@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+      - name: gofmt
+        run: |
+          diff <(gofmt -l .) <(echo -n "") || (echo "Files not gofmt'd, run: gofmt -w ." && exit 1)
+      - name: go vet
+        run: go vet ./...
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Unit tests (offline, no cluster/Docker required)
+        run: go test ./... -race -count=1 -v
+
+  envtest:
+    name: controller-runtime envtest (optional)
+    runs-on: ubuntu-latest
+    # This job exercises the reconciler against a real (locally downloaded)
+    # kube-apiserver + etcd via envtest, as an extra layer of confidence on
+    # top of the fake-client unit tests. It is intentionally separate from
+    # the `unit` job and allowed to fail without blocking CI, since envtest
+    # needs to download Kubernetes control-plane binaries at run time.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+      - name: Install setup-envtest
+        run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+      - name: Fetch envtest binaries
+        run: |
+          echo "KUBEBUILDER_ASSETS=$($(go env GOPATH)/bin/setup-envtest use 1.31.0 -p path)" >> "$GITHUB_ENV"
+      - name: Run envtest-tagged tests
+        run: go test ./internal/controller/... -tags=envtest -run TestEnvtest -v
+
+  helm-lint:
+    name: Helm chart lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.0
+      - run: helm lint charts/kube-rightsizer
+
+  docker-build:
+    name: Docker image build (no push)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: kube-rightsizer:ci
